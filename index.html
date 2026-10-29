@@ -679,6 +679,7 @@ const maxZ=()=>Math.min(50,30+2*wave);
 function newProfile(){const u=()=>({dmg:0,mag:0,rel:0,acc:0});return{best:0,coins:0,perks:{marathon:0,passe:0,vampire:0},upg:Object.fromEntries(Object.keys(WEAPONS).map(k=>[k,u()]))}}
 function normProfile(p){
   const d=newProfile(); if(!p)return d; d.best=+p.best||0; d.coins=+p.coins||0;
+  if(p.pz&&typeof p.pz==='object')d.pz=p.pz;   // Klucs, passe, boutique : ne JAMAIS les jeter (cause du reset à 0 et des récompenses re-proposées)
   for(const k in d.perks)d.perks[k]=p.perks&&p.perks[k]?1:0;
   for(const w in d.upg)for(const s in d.upg[w])d.upg[w][s]=clamp(+(p.upg&&p.upg[w]&&p.upg[w][s])||0,0,UMAX);
   return d;
@@ -8517,10 +8518,24 @@ try {
 'use strict';
 const $=id=>document.getElementById(id),safe=f=>{try{return f()}catch(e){console.warn('[progression]',e&&e.message||e)}};
 const nf=n=>Math.round(n).toLocaleString('fr-FR');
-const Z=()=>{const p=profile;if(!p.pz)p.pz={};const z=p.pz;z.cr=z.cr||0;z.own=z.own||{};z.eq=z.eq||{};z.packs=z.packs||0;z.bpx=z.bpx||0;z.bpc=z.bpc||{};
+/* --- persistance : miroir localStorage + cloud (le plus récent gagne ; réclamations et objets ne se perdent jamais) --- */
+const lsKey=()=>'zs_pz_'+((typeof user!=='undefined'&&user&&user.uid)||'guest');
+const HYD=new WeakSet();
+function hydrate(p){
+  if(HYD.has(p))return;HYD.add(p);
+  let l=null;try{l=JSON.parse(localStorage.getItem(lsKey())||'null')}catch(_){}
+  if(!l||typeof l!=='object')return;
+  const c=p.pz||(p.pz={}),newer=(+l.ts||0)>(+c.ts||0);
+  const bpc=Object.assign({},c.bpc||{},l.bpc||{}),own=Object.assign({},c.own||{},l.own||{});
+  if(newer)Object.assign(c,l);
+  c.bpc=bpc;c.own=own;
+}
+function mirror(){const p=profile;if(!p||!p.pz)return;p.pz.ts=Date.now();try{localStorage.setItem(lsKey(),JSON.stringify(p.pz))}catch(_){}}
+{const _sv=saveProfile;saveProfile=function(){safe(mirror);return _sv.apply(this,arguments)}}   // chaque sauvegarde du profil écrit aussi dans le localStorage
+const Z=()=>{const p=profile;hydrate(p);if(!p.pz)p.pz={};const z=p.pz;z.cr=z.cr||0;z.own=z.own||{};z.eq=z.eq||{};z.packs=z.packs||0;z.bpx=z.bpx||0;z.bpc=z.bpc||{};
   z.qx=z.qx||0;z.bps=1;return z};   // plus de saison : niveau, XP de quêtes et récompenses réclamées restent sur le compte
-const save=()=>safe(()=>saveProfile(false));
-const gain=n=>{Z().cr+=n;save()};
+const save=now=>safe(()=>saveProfile(!!now));
+const gain=n=>{Z().cr+=n;save(true)};
 const day=()=>{const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')};   // jour LOCAL : nouvelles quêtes à minuit
 const wk=()=>{const d=new Date();d.setHours(0,0,0,0);d.setDate(d.getDate()-((d.getDay()+6)%7));return 'S'+d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate()};   // semaine = lundi 00h00 local
 const hash=s=>[...s].reduce((a,c)=>(a*31+c.charCodeAt(0))>>>0,7);
@@ -8618,11 +8633,15 @@ const TITLES={t_boss:`Tueur de Boss`,t_surv:`Survivant`};
 function buy(id){const z=Z(),s=SHOP.find(x=>x.id===id);if(!s)return;
   if(s.id==='pack'){if(z.cr<s.c)return;z.cr-=s.c;z.packs++}
   else{if(z.own[id]||z.cr<s.c)return;z.cr-=s.c;z.own[id]=1;if(s.dr)z.eq.drone=id;else if(s.eq)z.eq[id]=1}
-  save();panel()}
+  save(true);panel()}
 function equip(id){const z=Z(),s=SHOP.find(x=>x.id===id);if(!s||!z.own[id])return;
-  if(s.dr)z.eq.drone=z.eq.drone===id?null:id;else z.eq[id]=!z.eq[id];save();panel()}
-function claim(L){const z=Z(),b=BP[L];if(!b||z.bpc[L]||bpLevel()<L)return;z.bpc[L]=1;
-  if(b.cr)z.cr+=b.cr;if(b.own){z.own[b.own]=1;if(b.eq)z.eq[b.eq]=1}save();panel()}
+  if(s.dr)z.eq.drone=z.eq.drone===id?null:id;else z.eq[id]=!z.eq[id];save(true);panel()}
+/* attribue le palier L une seule fois : claimed passe à true IMMÉDIATEMENT, avant tout le reste */
+function grant(L,z){const b=BP[L];if(!b||z.bpc[L])return null;
+  z.bpc[L]=true;
+  if(b.cr)z.cr+=b.cr;if(b.own){z.own[b.own]=1;if(b.eq)z.eq[b.eq]=1}
+  return b}
+function claim(L){const z=Z();if(bpLevel()<L||!grant(L,z))return;save(true);panel()}
 
 /* ---------- Interface ---------- */
 const KL_DEFS=`<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
@@ -8669,7 +8688,7 @@ function panel(open){
     h+=`<div>Niveau <b>${L}</b>/${BP_MAX} · ${nf(bpXP())} XP</div><div class="pz-bar"><i style="width:${pct}%"></i></div><small style="color:#94a3b8">${L>=BP_MAX?'Niveau maximum atteint':nf(bpXP()-pv)+' / '+nf(nx-pv)+' XP pour le niveau '+(L+1)}</small>`;
     h+=`<div style="margin:10px 0;display:flex;gap:6px;align-items:center;flex-wrap:wrap"><span class="pz-t" data-pg="${Math.max(0,pg-10)}">«</span><span class="pz-t" data-pg="${Math.max(0,pg-1)}">‹</span><b>Page ${pg+1} / ${pages}</b><span class="pz-t" data-pg="${Math.min(pages-1,pg+1)}">›</span><span class="pz-t" data-pg="${Math.min(pages-1,pg+10)}">»</span><span class="pz-t on" data-pg="${Math.floor((L-1)/BP_PAGE)}">Mon niveau</span></div>`;
     for(let l=pg*BP_PAGE+1;l<=(pg+1)*BP_PAGE;l++){const b=BP[l],got=z.bpc[l];
-      h+=`<div class="pz-r"><div><b>Niveau ${l}</b> <small style="color:#94a3b8">(${nf(cum(l))} XP)</small><br>🎁 ${b.f}${b.v?`<br><small style="color:#64748b">🔒 VIP : ${b.v}</small>`:''}</div><span class="pz-b" data-c="${l}" ${got||L<l?'disabled':''}>${got?'Reçu ✓':L<l?'Verrouillé':'Réclamer'}</span></div>`}
+      h+=`<div class="pz-r"${got?' style="opacity:.6"':''}><div><b>Niveau ${l}</b> <small style="color:#94a3b8">(${nf(cum(l))} XP)</small><br>🎁 ${b.f}${b.v?`<br><small style="color:#64748b">🔒 VIP : ${b.v}</small>`:''}</div><span class="pz-b" data-c="${l}" ${got||L<l?'disabled':''}>${got?'Réclamé ✓':L<l?'Verrouillé':'Réclamer'}</span></div>`}
     h+=`<p style="color:#94a3b8;margin-top:10px">Le passe monte avec le score de tes parties (niveau du compte) + l’XP des quêtes. Les klucs ne se gagnent qu’ici.</p>`;
   }
   const bx=$('pz-box');bx.innerHTML=h;
@@ -8763,6 +8782,72 @@ window.lvdHTML=L=>'<b class="lvd"><u>'+(L|0||1)+'</u></b>';
    return _h.apply(this,arguments)}}
 setInterval(()=>safe(()=>{if(!net.on)return;const L=accLevel();net.lv=net.lv||{};net.lv[net.id]=L;if(net.host)tx({t:'lvs',lv:net.lv});else tx({t:'lv',l:L})}),3000);
 css();setInterval(tick,1000);loop();
+
+/* ---------- Pop-up de récompense (retour au salon) ---------- */
+const RQ=[];let rOpen=false;
+function rcss(){if($('pz-rw-css'))return;const s=document.createElement('style');s.id='pz-rw-css';
+  s.textContent=`#pz-rw{position:fixed;inset:0;z-index:90;display:none;align-items:center;justify-content:center;background:rgba(2,6,23,.9);padding:12px}
+  #pz-rw.on{display:flex;animation:pzfade .25s ease-out}
+  .pz-rwc{position:relative;width:min(380px,100%);text-align:center;padding:26px 20px 20px;border-radius:20px;background:linear-gradient(160deg,#16213a,#0b1220);border:2px solid #fbbf24;color:#fff;font:14px system-ui;box-shadow:0 0 50px rgba(251,191,36,.45);animation:pzpop .55s cubic-bezier(.2,1.4,.4,1)}
+  .pz-rwc:before{content:'';position:absolute;inset:-60px;z-index:-1;background:radial-gradient(circle,rgba(251,191,36,.55),transparent 62%);animation:pzglow 2s ease-in-out infinite}
+  .pz-rwv{width:180px;height:180px;margin:0 auto;display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 0 18px rgba(251,191,36,.9))}
+  .pz-rwv canvas{width:180px;height:180px}
+  .pz-rwt{font-weight:800;letter-spacing:.12em;color:#fbbf24;font-size:12px;margin-bottom:4px}
+  .pz-rwn{font-weight:900;font-size:22px;margin:6px 0 2px}
+  .pz-rwbd{display:inline-block;margin:10px 0 14px;padding:4px 16px;border-radius:999px;background:#16a34a;font-weight:900;letter-spacing:.08em;animation:pzbadge .6s .35s both}
+  @keyframes pzfade{from{opacity:0}to{opacity:1}}
+  @keyframes pzpop{from{transform:scale(.4) rotate(-6deg);opacity:0}to{transform:none;opacity:1}}
+  @keyframes pzglow{0%,100%{opacity:.55;transform:scale(.95)}50%{opacity:1;transform:scale(1.08)}}
+  @keyframes pzbadge{from{transform:scale(0)}to{transform:scale(1)}}
+  @media (prefers-reduced-motion:reduce){.pz-rwc,.pz-rwc:before,.pz-rwbd,#pz-rw.on{animation:none}}`;
+  document.head.appendChild(s);
+  const d=document.createElement('div');d.id='pz-rw';document.body.appendChild(d)}
+let rStop=null;
+function mesh3d(host,it){   // petit mesh 3D qui tourne (three.js) ; repli : icône Klucs
+  try{
+    const W=180,r=new THREE.WebGLRenderer({alpha:true,antialias:true});r.setSize(W,W);r.setPixelRatio(Math.min(2,devicePixelRatio||1));
+    const sc=new THREE.Scene(),cam=new THREE.PerspectiveCamera(40,1,.1,50);cam.position.set(0,0,5);
+    sc.add(new THREE.AmbientLight(0xffffff,.7));const dl=new THREE.DirectionalLight(0xffffff,1);dl.position.set(3,4,5);sc.add(dl);
+    let m;
+    if(it.kl){m=new THREE.Mesh(new THREE.TorusGeometry(1,.34,16,40,Math.PI*1.7),new THREE.MeshStandardMaterial({color:0x22c55e,emissive:0x0a5a2a,metalness:.4,roughness:.35}))}
+    else if(/Katana/i.test(it.name)){m=new THREE.Mesh(new THREE.BoxGeometry(.18,2.6,.08),new THREE.MeshStandardMaterial({color:0x22d3ee,emissive:0x0891b2,metalness:.6,roughness:.2}));m.rotation.z=.5}
+    else{m=new THREE.Mesh(new THREE.IcosahedronGeometry(1.2,0),new THREE.MeshStandardMaterial({color:/Camo/i.test(it.name)?0xa3875a:0xa78bfa,emissive:0x221133,flatShading:true,metalness:.3,roughness:.5}))}
+    sc.add(m);host.innerHTML='';host.appendChild(r.domElement);
+    let alive=true;(function f(){if(!alive)return;m.rotation.y+=.025;if(!it.kl)m.rotation.x+=.008;r.render(sc,cam);requestAnimationFrame(f)})();
+    return()=>{alive=false;try{r.dispose();r.forceContextLoss()}catch(_){}}
+  }catch(e){host.innerHTML=klIcon(120);return null}
+}
+function closeReward(){const d=$('pz-rw');if(d)d.classList.remove('on');if(rStop){rStop();rStop=null}rOpen=false;setTimeout(showReward,250)}
+function showReward(){
+  if(rOpen||!RQ.length)return;rcss();rOpen=true;const it=RQ.shift(),d=$('pz-rw');
+  d.innerHTML=`<div class="pz-rwc"><div class="pz-rwt">★ NOUVEAU PALIER ★</div><div class="pz-rwv"></div>
+    <div class="pz-rwn">${it.name}</div><div style="color:#94a3b8">${it.sub||''}</div>
+    <div class="pz-rwbd">✓ REÇU</div><br><span class="pz-b" id="pz-rw-ok" tabindex="0">Super !</span></div>`;
+  d.classList.add('on');try{document.exitPointerLock()}catch(_){}
+  rStop=mesh3d(d.querySelector('.pz-rwv'),it);
+  const ok=$('pz-rw-ok');ok.onclick=closeReward;ok.focus();
+}
+/* nouveaux paliers atteints depuis la dernière visite du salon : attribués automatiquement + pop-up */
+function checkNew(){
+  const z=Z(),L=bpLevel();
+  if(z.bpn===undefined){z.bpn=L<=1?0:L;save();if(L>1)return}   // comptes existants : pas de rafale rétroactive
+  if(L<=z.bpn)return;
+  let kl=0,k0=0,k1=0;const its=[];
+  for(let l=z.bpn+1;l<=L;l++){const b=grant(l,z);if(!b)continue;const m=MS[l];
+    if(m&&m.x)its.push({name:m.x,sub:`Niveau ${l} · +${nf(b.cr)} Klucs`,own:b.own});else{kl+=b.cr;k0=k0||l;k1=l}}
+  z.bpn=L;save(true);
+  if(kl)its.push({kl:1,name:`${nf(kl)} Klucs`,sub:k0===k1?`Niveau ${k0}`:`Niveaux ${k0} à ${k1}`});
+  RQ.push(...its);showReward();
+}
+const inLobby=()=>{const l=$('lobby');return !!l&&l.style.display==='block'&&!(typeof state!=='undefined'&&state==='PLAYING')};
+let padHeld=false;
+setInterval(()=>safe(()=>{
+  if(rOpen){const g=(navigator.getGamepads&&navigator.getGamepads()||[]);let p=false;for(const x of g)if(x&&x.buttons&&((x.buttons[0]&&x.buttons[0].pressed)||(x.buttons[1]&&x.buttons[1].pressed)))p=true;
+    if(p&&!padHeld)closeReward();padHeld=p;return}
+  const P=$('pz-panel');if(!inLobby()||(P&&P.style.display==='flex'))return;
+  checkNew();
+}),700);
+addEventListener('keydown',e=>{if(rOpen&&(e.code==='Enter'||e.code==='Escape'||e.code==='Space')){e.preventDefault();e.stopPropagation();closeReward()}},true);
 Object.assign(window.PZ,{gain,prog,panel:()=>panel(true),level:bpLevel});   // (fix) on COMPLÈTE PZ : l'ancienne ligne écrasait PZ.open -> clic sans effet sur Quêtes / Passe
 })();
 
